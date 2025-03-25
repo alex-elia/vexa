@@ -211,7 +211,7 @@ After all services are running, you can access:
 - 🌐 [Vexa Website](https://vexa.ai)
 - 💼 [LinkedIn](https://www.linkedin.com/company/vexa-ai/)
 - 🐦 [X (@grankin_d)](https://x.com/grankin_d)
-- 💬 [Discord Community](https://discord.gg/X8fU4Q2x)
+- 💬 [Discord Community](https://discord.gg/Ga9duGkVz9)
 
 ⭐ Star this repository to stay updated on new releases!
 
