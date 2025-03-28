@@ -2,9 +2,7 @@
   <img src="assets/logodark.svg" alt="Vexa Logo" width="40"/>
 </p>
 
-# Vexa
-
-# API for **Real-Time Meeting Transcription**
+# Vexa: API for **Real-Time Meeting Transcription**
 
 Vexa is an API for **real-time meeting transcription** using **meeting bots** and direct **streaming from web/mobile apps**. It extracts knowledge from various platforms including:
 
