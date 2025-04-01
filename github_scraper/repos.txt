@@ -1,0 +1,10 @@
+# List of GitHub repositories to scrape (one per line)
+# Lines starting with # are treated as comments and will be ignored
+
+# Top trending GitHub repositories (January 2025)
+# Source: https://dev.to/leamsigc/top-10-trending-github-repositories-january-2025-1f24
+https://github.com/OpenBMB/MiniCPM-o
+https://github.com/TabbyML/tabby
+https://github.com/FujiwaraChoki/MoneyPrinterV2
+https://github.com/KoljaB/RealtimeSTT
+https://github.com/Postiz/Postiz 
