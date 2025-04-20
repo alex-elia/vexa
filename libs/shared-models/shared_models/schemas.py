@@ -3,6 +3,11 @@ from pydantic import BaseModel, Field, EmailStr, validator
 from datetime import datetime
 from enum import Enum, auto
 import re # Import re for native ID validation
+import decimal # For Numeric type representation
+
+# Import models from their respective files
+from . import models
+from . import billing_models
 
 # --- Platform Definitions ---
 
@@ -104,7 +109,7 @@ class Platform(str, Enum):
         except ValueError:
             return None # Invalid platform string
 
-# --- Schemas from Admin API --- 
+# --- Schemas from Admin API (User/Token - defined in models.py) ---
 
 class UserBase(BaseModel): # Base for common user fields
     email: EmailStr
@@ -138,7 +143,7 @@ class TokenResponse(TokenBase):
 class UserDetailResponse(UserResponse):
     tokens: List[TokenResponse] = []
 
-# --- Meeting Schemas --- 
+# --- Meeting Schemas (defined in models.py) --- 
 
 class MeetingBase(BaseModel):
     platform: Platform = Field(..., description="Platform identifier (e.g., 'google_meet', 'zoom')")
@@ -163,6 +168,8 @@ class MeetingCreate(BaseModel):
     bot_name: Optional[str] = Field(None, description="Optional name for the bot in the meeting")
     language: Optional[str] = Field(None, description="Optional language code for transcription (e.g., 'en', 'es')")
     task: Optional[str] = Field(None, description="Optional task for the transcription model (e.g., 'transcribe', 'translate')")
+    # Add model_identifier to creation request
+    model_identifier: Optional[str] = Field(None, description="Specific transcription model identifier requested (e.g., 'faster-whisper-medium')")
 
     @validator('platform')
     def platform_must_be_valid(cls, v):
@@ -191,7 +198,23 @@ class MeetingResponse(BaseModel): # Not inheriting from MeetingBase anymore to a
         orm_mode = True
         use_enum_values = True # Serialize Platform enum to its string value
 
-# --- Transcription Schemas --- 
+# --- Meeting Session Schema (defined in models.py) ---
+
+class MeetingSessionResponse(BaseModel):
+    id: int
+    meeting_id: int
+    session_uid: str
+    session_start_time: datetime # Should be timezone-aware from DB
+    # Add new fields
+    model_identifier: Optional[str]
+    max_end_time: float
+    total_segment_duration_seconds: decimal.Decimal # Represent Numeric as Decimal
+    last_updated: datetime # Should be timezone-aware from DB
+    
+    class Config:
+        orm_mode = True
+
+# --- Transcription Schemas (defined in models.py) --- 
 
 class TranscriptionSegment(BaseModel):
     # id: Optional[int] # No longer relevant to expose outside DB
@@ -199,10 +222,11 @@ class TranscriptionSegment(BaseModel):
     end_time: float = Field(..., alias='end')     # Add alias
     text: str
     language: Optional[str]
-    created_at: Optional[datetime]
+    created_at: Optional[datetime] # From original Transcription model
     speaker: Optional[str] = None
     absolute_start_time: Optional[datetime] = Field(None, description="Absolute start timestamp of the segment (UTC)")
     absolute_end_time: Optional[datetime] = Field(None, description="Absolute end timestamp of the segment (UTC)")
+    session_uid: Optional[str] # From original Transcription model
 
     class Config:
         orm_mode = True
@@ -218,6 +242,8 @@ class WhisperLiveData(BaseModel):
     token: str # User API token
     meeting_id: str # Native Meeting ID (string, e.g., 'abc-xyz-pqr')
     segments: List[TranscriptionSegment]
+    # Add model identifier to whisperlive data
+    model_identifier: Optional[str] = Field(None, description="Actual model identifier used by WhisperLive for this session")
 
     @validator('platform', pre=True)
     def validate_whisperlive_platform_str(cls, v):
@@ -261,3 +287,129 @@ class ErrorResponse(BaseModel):
 
 class MeetingListResponse(BaseModel):
     meetings: List[MeetingResponse] 
+    
+
+# --- NEW Billing Schemas (defined in billing_models.py) ---
+
+# PlanModelLimit Schemas
+class PlanModelLimitBase(BaseModel):
+    model_identifier: str
+    monthly_included_hours: Optional[int]
+
+class PlanModelLimitCreate(PlanModelLimitBase):
+    pass
+
+class PlanModelLimitResponse(PlanModelLimitBase):
+    id: int
+    plan_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+# Plan Schemas
+class PlanBase(BaseModel):
+    name: str
+    max_concurrent_bots: int = 1
+    is_active: bool = True
+
+class PlanCreate(PlanBase):
+    # Allow specifying limits on creation
+    model_limits: Optional[List[PlanModelLimitCreate]] = []
+
+class PlanUpdate(PlanBase):
+    # Allow specifying limits on update (or maybe handle separately)
+    name: Optional[str] = None # Make fields optional for update
+    max_concurrent_bots: Optional[int] = None
+    is_active: Optional[bool] = None
+    # How to handle model_limits updates? Overwrite? Patch?
+    # For simplicity now, maybe require separate endpoint for limits or full replace
+
+class PlanResponse(PlanBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    model_limits: List[PlanModelLimitResponse] = []
+
+    class Config:
+        orm_mode = True
+
+# UserPlan Schemas
+class UserPlanBase(BaseModel):
+    plan_id: int
+    billing_cycle_anchor: Optional[datetime] = None # Optional on create/update, defaults in DB
+    status: str = 'active'
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+
+class UserPlanCreate(UserPlanBase):
+    user_id: int # Required on creation
+
+class UserPlanUpdate(UserPlanBase):
+    plan_id: Optional[int] = None # Optional on update
+    status: Optional[str] = None
+    # Allow updating anchor? Be careful with implications.
+
+class UserPlanResponse(UserPlanBase):
+    id: int
+    user_id: int
+    created_at: datetime
+    updated_at: datetime
+    # Include nested Plan details?
+    plan: Optional[PlanResponse] = None # Optional nesting
+
+    class Config:
+        orm_mode = True
+
+# ReferralData Schemas
+class ReferralDataBase(BaseModel):
+    utm_source: Optional[str] = None
+    utm_medium: Optional[str] = None
+    utm_campaign: Optional[str] = None
+    utm_term: Optional[str] = None
+    utm_content: Optional[str] = None
+    referer_url: Optional[str] = None
+
+class ReferralDataCreate(ReferralDataBase):
+    user_id: int # Provided by backend based on auth
+
+class ReferralDataResponse(ReferralDataBase):
+    id: int
+    user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+# --- Internal API Schemas ---
+
+class InternalReferralLogRequest(ReferralDataBase):
+    # user_id will be determined from the auth token
+    pass
+
+class InternalLimitCheckResponse(BaseModel):
+    usage_ok: bool
+    reason: Optional[str] = None
+    concurrency_limit: int
+
+class UsageQuoteResponse(BaseModel):
+    total_duration_seconds: decimal.Decimal # Use Decimal for precision
+    filter: Dict[str, Optional[str]] # Echo back the filters applied
+
+# --- Bot Manager Schemas (example) ---
+
+class BotStopResponse(BaseModel):
+    message: str
+    meeting_id: int
+    status: str
+
+class BotReconfigureRequest(BaseModel):
+    language: Optional[str] = None
+    task: Optional[str] = None
+
+class BotReconfigureResponse(BaseModel):
+    message: str
+    meeting_id: int
+    updated_config: Dict[str, Optional[str]] 

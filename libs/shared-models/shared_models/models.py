@@ -3,11 +3,10 @@ from sqlalchemy import (Column, String, Text, Integer, DateTime, Float, ForeignK
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime # Needed for Transcription model default
-from shared_models.schemas import Platform # Import Platform for the static method
 from typing import Optional # Added for the return type hint in constructed_meeting_url
 
-# Define the base class for declarative models
-Base = declarative_base()
+# Import Base from database module where it's now defined
+from .database import Base 
 
 class User(Base):
     __tablename__ = "users"
@@ -72,6 +71,7 @@ class Meeting(Base):
     @property
     def constructed_meeting_url(self) -> Optional[str]: # Added return type hint
         # Calculate the URL on demand using the static method from schemas.py
+        from shared_models.schemas import Platform
         if self.platform and self.platform_specific_id:
              return Platform.construct_meeting_url(self.platform, self.platform_specific_id)
         return None
@@ -103,6 +103,12 @@ class MeetingSession(Base):
     session_uid = Column(String, nullable=False, index=True) # Stores the 'uid' (based on connectionId)
     # Store timezone-aware timestamp to avoid ambiguity
     session_start_time = Column(sqlalchemy.DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # New columns for Phase 1 Plan
+    model_identifier = Column(String(100), nullable=True, index=True) # e.g., "faster-whisper-medium"
+    max_end_time = Column(Float, default=0.0) # Relative end time (duration) of this specific session
+    total_segment_duration_seconds = Column(sqlalchemy.Numeric, default=0) # Sum of actual speech segment durations
+    last_updated = Column(sqlalchemy.DateTime(timezone=True), server_default=func.now(), onupdate=func.now()) # Timezone-aware UTC
 
     meeting = relationship("Meeting", back_populates="sessions") # Define relationship
 

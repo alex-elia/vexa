@@ -15,6 +15,10 @@ from shared_models.schemas import UserCreate, UserResponse, TokenResponse, UserD
 # Database utilities (needs to be created)
 from shared_models.database import get_db, init_db # New import
 
+# Import the new routers
+from app.api.routes import core as core_router
+from app.api.routes import billing as billing_router
+
 # Logging configuration
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -47,77 +51,56 @@ async def verify_admin_token(admin_api_key: str = Security(API_KEY_HEADER)):
     logger.info("Admin token verified successfully.")
     # No need to return anything, just raises exception on failure 
 
-# Router setup (all routes require admin token verification)
-router = APIRouter(
-    prefix="/admin",
-    tags=["Admin"],
-    dependencies=[Depends(verify_admin_token)]
-)
+# Router setup (OLD - REMOVED)
+# router = APIRouter(
+#     prefix="/admin",
+#     tags=["Admin"],
+#     dependencies=[Depends(verify_admin_token)]
+# )
 
-# --- Helper Functions --- 
-def generate_secure_token(length=40):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for i in range(length))
+# --- Helper Functions --- (MOVED TO core.py)
+# def generate_secure_token(length=40):
+#     alphabet = string.ascii_letters + string.digits
+#     return ''.join(secrets.choice(alphabet) for i in range(length))
 
-# --- Admin Endpoints (Copied and adapted from bot-manager/admin.py) --- 
-@router.post("/users", 
-             response_model=UserResponse, 
-             status_code=status.HTTP_201_CREATED,
-             summary="Create a new user")
-async def create_user(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
-    existing_user = await db.execute(select(User).where(User.email == user_in.email))
-    if existing_user.scalars().first():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, 
-            detail="User with this email already exists"
-        )
-    db_user = User(**user_in.dict())
-    db.add(db_user)
-    await db.commit()
-    await db.refresh(db_user)
-    logger.info(f"Admin created user: {db_user.email} (ID: {db_user.id})")
-    # Use UserResponse for consistency with schema definition (datetime object)
-    return UserResponse.from_orm(db_user)
-
-@router.get("/users", 
-            response_model=List[UserResponse], # Use List import
-            summary="List all users")
-async def list_users(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).offset(skip).limit(limit))
-    users = result.scalars().all()
-    return [UserResponse.from_orm(u) for u in users]
-
-@router.post("/users/{user_id}/tokens", 
-             response_model=TokenResponse,
-             status_code=status.HTTP_201_CREATED,
-             summary="Generate a new API token for a user")
-async def create_token_for_user(user_id: int, db: AsyncSession = Depends(get_db)):
-    user = await db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    
-    token_value = generate_secure_token()
-    # Use the APIToken model from shared_models
-    db_token = APIToken(token=token_value, user_id=user_id)
-    db.add(db_token)
-    await db.commit()
-    await db.refresh(db_token)
-    logger.info(f"Admin created token for user {user_id} ({user.email})")
-    # Use TokenResponse for consistency with schema definition (datetime object)
-    return TokenResponse.from_orm(db_token)
+# --- Admin Endpoints (MOVED TO core.py) --- 
+# @router.post("/users", ...)
+# ...
+# @router.get("/users", ...)
+# ...
+# @router.post("/users/{user_id}/tokens", ...)
+# ...
 
 # TODO: Add endpoints for GET /users/{id}, DELETE /users/{id}, DELETE /tokens/{token_value}
 
-# Include the router in the main app
-app.include_router(router)
+# Include the OLD router in the main app (REMOVED)
+# app.include_router(router)
+
+# Include the NEW routers, applying the prefix and admin token dependency
+app.include_router(
+    core_router.router, 
+    prefix="/admin", 
+    tags=["Admin"], # Apply a general tag, specific tags are in the router files
+    dependencies=[Depends(verify_admin_token)]
+)
+app.include_router(
+    billing_router.router, 
+    prefix="/admin", # Apply the same prefix
+    tags=["Admin"], # Apply a general tag, specific tags are in the router files
+    # Note: Most billing routes require admin token (applied here),
+    # but /internal/log_referral uses its own user auth (defined in billing.py)
+    dependencies=[Depends(verify_admin_token)] 
+)
 
 # Add startup event to initialize DB (if needed for this service)
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting up Admin API...")
     # Requires database_utils.py to be created in admin-api/app
-    await init_db() 
-    logger.info("Database initialized.")
+    # Ensure shared_models.database.init_db can handle models from both
+    # models.py and billing_models.py if it creates tables.
+    await init_db(drop_tables=True) 
+    logger.info("Database schema recreated.")
 
 # Root endpoint (optional)
 @app.get("/")

@@ -1,12 +1,19 @@
 import os
 import logging
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy import create_engine # For sync engine if needed for migrations later
 
-# Import Base from models within the same package
+# -- DEFINE BASE HERE --
+Base = declarative_base()
+
 # Ensure models are imported somewhere before init_db is called so Base is populated.
-from .models import Base 
+# Remove Base import from models.py and billing_models.py
+# Imports below are for database.py functionality, not Base registration
+# from .models import Base # REMOVED
+# from . import billing_models # Can keep this import if needed elsewhere, or remove
+from . import models # Import models to ensure they register with Base here
+from . import billing_models # Import billing_models to ensure they register with Base here
 
 logger = logging.getLogger("shared_models.database")
 
@@ -47,17 +54,36 @@ async def get_db() -> AsyncSession:
             # Ensure session is closed, though context manager should handle it
             await session.close()
 
-# --- Initialization Function --- 
-async def init_db():
-    """Creates database tables based on shared models' metadata."""
+# --- Initialization Function (MODIFIED TO DROP/CREATE) --- 
+async def init_db(drop_tables: bool = False):
+    """
+    Initializes database tables based on shared models' metadata.
+    If drop_tables is True, ALL existing tables defined in Base.metadata
+    will be dropped first. USE WITH CAUTION IN PRODUCTION.
+    """
+    # Ensures that models in billing_models are loaded and registered with Base.metadata
+    # This is implicitly handled by the import: from . import billing_models
+    
     logger.info(f"Initializing database tables at {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    if drop_tables:
+        logger.warning("!!! DROPPING ALL TABLES DEFINED IN Base METADATA !!!")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.drop_all)
+            logger.info("Existing tables dropped successfully.")
+        except Exception as e:
+            logger.error(f"Error dropping database tables: {e}", exc_info=True)
+            raise
+            
+    logger.info("Creating database tables...")
     try:
         async with engine.begin() as conn:
             # This relies on all SQLAlchemy models being imported 
-            # somewhere before this runs, so Base.metadata is populated.
-            # Add checkfirst=True to prevent errors if tables already exist
-            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
-        logger.info("Database tables checked/created successfully.")
+            # somewhere before this runs, so Base.metadata is populated
+            # (models.py and billing_models.py).
+            # Create all tables (no checkfirst needed after potential drop)
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created successfully.")
     except Exception as e:
-        logger.error(f"Error initializing database tables: {e}", exc_info=True)
+        logger.error(f"Error creating database tables: {e}", exc_info=True)
         raise 

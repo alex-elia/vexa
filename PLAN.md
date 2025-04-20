@@ -1,196 +1,156 @@
-# Vexa Billing, Rate Limiting, and Analytics Implementation Plan
+# Vexa Simplified Implementation Plan: UTM Tracking, Concurrency, Per-Model Usage Limits & Quote
 
-This document outlines a detailed plan for integrating billing, rate limiting, and analytics features into the Vexa system, building upon the existing architecture described in `system-design.md` and `docker-compose.yml`.
+## 1. Objectives
 
-**Assumptions:**
+*   Implement basic user attribution tracking via UTM parameters and referers.
+*   Enforce limits on the number of concurrent bot sessions per user based on assigned plans.
+*   Introduce a simple monthly usage limit (in hours) **per transcription model type** per user, based on assigned plans.
+*   Provide an efficient API endpoint for users to query their usage (total duration, potentially filterable by model) within a given period.
+*   Establish foundational elements (Plans, per-model limits, usage aggregation) that align closer to potential future billing needs.
 
-*   Access to modify codebases: `api-gateway`, `admin-api`, `bot-manager`, `transcription-collector`, `vexa-bot`, `whisperlive`.
-*   Existence of a `shared_models` package/directory for common PostgreSQL models/schemas.
-*   Introduction of a new `billing-service`.
-*   Primary billing metric: **Transcription minutes consumed, differentiated by model type**.
-*   Rate limits apply to: **API request frequency** and **concurrent bot sessions**.
+## 2. Rationale
 
-**Phase 1: Foundations - Database Models & Billing Service Shell**
+*   The original `PLAN.md` detailed a comprehensive billing system, which was initially simplified.
+*   This revised plan re-introduces **per-model usage limits** based on user requirements, adding back some complexity but targeting specific control needs.
+*   It focuses on controlling resource usage (concurrency, total hours per model) and understanding user acquisition (UTM).
+*   It leverages Redis for fast concurrency checks and introduces an aggregation table (`SessionUsageSummary`) for efficient usage calculation per model, per session.
 
-1.  **Define Database Schemas (`shared_models/models.py` or similar):**
-    *   **`Plan` Table:**
-        *   `id` (PK, UUID/Serial)
-        *   `name` (String, unique, e.g., "Free", "Pro", "Enterprise")
-        *   `description` (Text, optional)
-        *   `api_requests_per_minute` (Integer, nullable) - Rate limit for API gateway
-        *   `max_concurrent_bots` (Integer, nullable) - Rate limit for bot manager
-        *   `monthly_cost` (Numeric/Decimal, optional)
-        *   `is_active` (Boolean, default: True)
-        *   `created_at`, `updated_at` (Timestamps)
-    *   **`PlanModelLimit` Table:** (Billing limits per model)
-        *   `id` (PK)
-        *   `plan_id` (FK -> `Plan.id`)
-        *   `model_identifier` (String, e.g., "faster-whisper-medium", "whisper-large-v3") - Must match identifier used by `whisperlive`.
-        *   `included_minutes` (Integer, nullable) - Billing quota
-        *   `price_per_extra_minute` (Numeric/Decimal, nullable) - Overage cost
-        *   `created_at`, `updated_at`
-    *   **`UserPlan` Table:** (Assigns plans to users)
-        *   `id` (PK)
-        *   `user_id` (FK -> `User.id`) - Assumes `User` table in `admin-api`/`shared_models`.
-        *   `plan_id` (FK -> `Plan.id`)
-        *   `billing_cycle_anchor` (Timestamp) - Day/time billing resets each cycle.
-        *   `start_date` (Timestamp)
-        *   `end_date` (Timestamp, nullable)
-        *   `status` (String, e.g., "active", "cancelled", "trial")
-        *   `created_at`, `updated_at`
-    *   **`UsageRecord` Table:** (Aggregated usage per billing cycle)
-        *   `id` (PK)
-        *   `user_plan_id` (FK -> `UserPlan.id`)
-        *   `model_identifier` (String)
-        *   `billing_period_start` (Timestamp)
-        *   `billing_period_end` (Timestamp)
-        *   `consumed_minutes` (Numeric/Decimal, default: 0) - Use decimal for precision.
-        *   `last_updated` (Timestamp)
+## 3. Core Requirements
 
-2.  **Update `shared_models/schemas.py`:**
-    *   Create Pydantic schemas corresponding to the new DB tables for API validation and responses.
+*   **Database:**
+    *   `Base` defined in `database.py`.
+    *   Core models (`User`, `APIToken`, `Meeting`, `Transcription`, `MeetingSession`) in `models.py`.
+    *   Billing models (`Plan`, `PlanModelLimit`, `UserPlan`, `ReferralData`) in `billing_models.py`.
+    *   **Modify `MeetingSession` table:** Add `model_identifier`, `max_end_time` (Float), `total_segment_duration_seconds` (Numeric), `last_updated` columns. **(Implemented in Phase 1)**
+*   **Services:**
+    *   `admin-api`:
+        *   Endpoint (`/admin/internal/log_referral`) to receive and store UTM/referer data (called by client-side). **(Basic endpoint implemented in Phase 1)**
+        *   Admin endpoints to manage `Plan` definitions (including nested `PlanModelLimit`) and `UserPlan` assignments. **(Basic CRUD implemented in Phase 1)**
+        *   **NEW (Phase 3):** Internal endpoint (`/internal/check_limits`) queried by `bot-manager`:
+            *   Accepts `user_id` and `model_identifier`.
+            *   Checks monthly usage for that *specific model* against plan limits (querying `PlanModelLimit` and **`MeetingSession`**/**`Meeting`** tables).
+            *   Retrieves the overall concurrency limit from the `Plan`.
+            *   Returns usage status and concurrency limit.
+        *   **NEW (Phase 3):** User-facing endpoint (`/usage/quote`) to report total usage duration for a given period (querying **`MeetingSession`**/**`Meeting`** tables), potentially allowing filtering by model.
+    *   `transcription-collector` **(Phase 3):**
+        *   Modify processing of `session_start` events to parse `model_identifier`, store it in `MeetingSession`, and initialize usage aggregate fields.
+        *   Modify processing of `transcription` events to look up the `MeetingSession` row via `session_uid` and update its usage aggregate fields (`max_end_time`, increment `total_segment_duration_seconds`, `last_updated`).
+    *   `bot-manager` **(Phase 2):**
+        *   Pass the requested `model_identifier` when calling **`admin-api`**'s `/internal/check_limits`.
+        *   Call **`admin-api`** to check usage (for the specific model) and get concurrency limit before starting a bot.
+        *   Use Redis Set (`active_bots:{user_id}`) to track and enforce the retrieved concurrency limit.
+        *   Update the Redis Set when bots start and stop.
+*   **Client-Side:**
+    *   User-facing application needs a script to capture UTM/referer data and send it to the `admin-api` endpoint.
 
-3.  **Create `billing-service`:**
-    *   **Project Setup:** `services/billing-service` directory with standard FastAPI structure (`main.py`, `crud.py`, `database.py`, `models.py` [imports `shared_models`], `schemas.py` [imports/extends `shared_models`]).
-    *   **Dockerfile:** Create `services/billing-service/Dockerfile`.
-    *   **`docker-compose.yml`:**
-        *   Add `billing-service` definition.
-        *   Set build context/Dockerfile.
-        *   Define dependencies: `postgres` (condition: service_healthy), `redis` (condition: service_started).
-        *   Map environment variables (DB connection string, Redis URL).
-        *   Assign to `vexa_default` network.
-        *   Expose internal port (e.g., 8002).
-        *   Implement a basic health check endpoint and configure it in `docker-compose`.
+## 4. Prerequisites
 
-**Phase 2: Metric Collection - Tracking Model & Duration**
+*   **Modify `whisperlive`:** The `whisperlive` service **must** be updated to include the `actual_model_identifier` being used for transcription in the **`session_start` event** published to the `transcription_segments` Redis Stream. This identifier is required for per-model usage tracking and limit enforcement. **(Still Pending)**
 
-1.  **Allow Model Selection (`api-gateway`, `bot-manager`, `vexa-bot`):**
-    *   **`api-gateway` (`services/api-gateway/app/main.py` - Forwarding Logic):**
-        *   Modify `POST /bots` endpoint: Expect optional `model_type` (String) in the request body.
-        *   Pass `model_type` along in the forwarded request payload to `bot-manager`.
-    *   **`bot-manager` (`services/bot-manager/app/main.py` - `POST /bots` Handler):**
-        *   Accept `model_type` from the request body.
-        *   *Enhancement:* Validate `model_type` against `PlanModelLimit` entries for the user's plan (requires call to `billing-service` or DB).
-        *   Add `model_type` to the `BOT_CONFIG` JSON string passed as an environment variable to the `vexa-bot` container.
-    *   **`vexa-bot` (`services/vexa-bot/core/src/config.ts`, `main.ts`, `google.ts`):**
-        *   Parse `BOT_CONFIG` JSON to extract `model_type`.
-        *   Include the requested `model_type` in the initial JSON configuration message sent over the WebSocket to `whisperlive`.
+## 5. Uncertainties & Assumptions (Post-Verification)
 
-2.  **Report Model Used & Emit Usage (`whisperlive`, `transcription-collector`):**
-    *   **`whisperlive` (`services/WhisperLive/` - WebSocket Handler):**
-        *   Receive `model_type` from the initial client configuration message.
-        *   Determine the `actual_model_identifier` being used for transcription (e.g., could be a default if requested model is invalid/unavailable).
-        *   **Crucial:** Include this `actual_model_identifier` in **both** the `session_start` event and **every** `transcription` event published to the `transcription_segments` Redis Stream. Add a new field like `"model_identifier": "..."`.
-    *   **`transcription-collector` (`services/transcription-collector/app/` - Stream Consumer):**
-        *   **Caching Model Info:** When processing `session_start` events, cache the `actual_model_identifier` associated with the `uid` (e.g., in a Redis Hash `session_model:{uid}` with a TTL).
-        *   **Processing Transcriptions:** When processing `transcription` events:
-            *   Retrieve `actual_model_identifier` for the event's `uid` from the cache.
-            *   Calculate the duration of the *new* segment (`end_time - start_time`). Ensure idempotency if streams deliver duplicates.
-            *   Look up `user_id` and `meeting_id` (likely using `uid`).
-            *   Publish a new event type, `usage_update`, to a **new Redis Stream** (e.g., `name: usage_events`).
-            *   `usage_update` event payload (JSON): `{ "user_id": ..., "meeting_id": ..., "model_identifier": ..., "duration_seconds_added": ..., "timestamp": ... }`.
+*   **Schema Details:** Resolved.
+*   **`MeetingSession.model_identifier` Source:** Requires implementation in `whisperlive`. Status: Implementation Required.
+*   **Timestamp Precision/Timezones:** Recommendation: New fields use `DateTime(timezone=True)`. Existing require care. Status: Implemented with `DateTime(timezone=True)`. Requires careful handling in queries.
+*   **Client-Side UTM Implementation:** External Dependency.
+*   **Usage Granularity Metric:** Using **Sum of `MeetingSession.max_end_time`**. Each `max_end_time` represents the duration of a specific WebSocket connection instance (relative to its own start=0). Summing these across relevant sessions provides total active usage time. `total_segment_duration_seconds` also stored for potential alternative analysis. Status: Design Decision Confirmed (User disregard concern).
+*   **Performance:** **Mitigation:** `transcription-collector` will use **Redis Hashes + a Set** for caching aggregates + periodic flush (e.g., every 10s) to avoid excessive DB UPDATEs on `MeetingSession`. This reduces DB write load significantly. Performance of Redis ops, flush task, and `admin-api` queries needs monitoring. **Status: Concern Mitigated - Requires Monitoring.**
+*   **Data Consistency:** Usage data in PG DB will lag slightly behind real-time Redis cache (by flush interval). Limit checks use PG DB data. Status: Known Limitation (Acceptable Delay Confirmed).
+*   **Scalability/Maintainability:** Architectural Concern (Caching adds complexity).
+*   **Edge Cases:** Implementation Design Concern.
 
-**Phase 3: Enforcement - Limits & Quotas**
+---
 
-1.  **API Rate Limiting (`api-gateway`):**
-    *   **Dependency:** Add `slowapi` to `services/api-gateway/requirements.txt`.
-    *   **Implementation (`services/api-gateway/app/main.py`):**
-        *   Initialize `slowapi.Limiter` with `RedisStorage` using `REDIS_URL`.
-        *   Create a reusable dependency function (`get_current_user_and_plan_limits`) that:
-            *   Extracts `X-API-Key` header.
-            *   Authenticates key -> `user_id` (call `admin-api` or direct DB, use caching).
-            *   Fetches user's active `UserPlan` -> `plan_id` (call `billing-service` or direct DB, use caching).
-            *   Fetches `Plan` details for `plan_id` -> `api_requests_per_minute` limit (use caching).
-            *   Returns `(user_id, api_limit_string)` (e.g., `(123, "100/minute")`).
-        *   Apply the limiter using FastAPI middleware or route decorators (`@limiter.limit(get_current_user_and_plan_limits)`), dynamically setting the limit per user based on their plan. Key the limit by `user_id`.
+**Phase 1: Foundations - Database Models & Basic Setup (Implemented)**
 
-2.  **Concurrent Bot Limit (`bot-manager`):**
-    *   **Implementation (`services/bot-manager/app/main.py` - `POST /bots` Handler):**
-        *   After authenticating `X-API-Key` -> `user_id`:
-            *   Fetch the user's active plan and `max_concurrent_bots` limit (call `billing-service` or DB, use caching).
-            *   Perform a DB query: `SELECT COUNT(*) FROM meetings WHERE user_id = :user_id AND status = 'active'`.
-            *   If `count >= max_concurrent_bots`, return HTTP `429 Too Many Requests` or `403 Forbidden`.
+1.  **Define/Refine Database Schemas:** **(DONE)**
+    *   **`Base` definition moved to `libs/shared-models/shared_models/database.py`**.
+    *   **Core Models (`libs/shared-models/shared_models/models.py`):** **(DONE)**
+        *   Kept `User`, `APIToken`, `Meeting`, `Transcription`.
+        *   Modified `MeetingSession` Table (added `model_identifier`, `max_end_time`, `total_segment_duration_seconds`, `last_updated`).
+    *   **Billing Models (`libs/shared-models/shared_models/billing_models.py`) (New File):** **(DONE)**
+        *   Created file.
+        *   Defined `Plan`, `PlanModelLimit`, `UserPlan`, `ReferralData` models inheriting `Base` from `database.py`.
+    *   **Removed `SessionUsageSummary` Table definition.** **(N/A - Was not created)**
+2.  **Centralize Redis Key Management (`libs/shared-models/shared_models/redis_keys.py`) (New Task):** **(DONE)**
+    *   Created the new file `redis_keys.py`.
+    *   Defined constants and helper functions.
+3.  **Update `libs/shared-models/shared_models/schemas.py`:** **(DONE)**
+    *   Added/updated Pydantic schemas for `Plan`, `PlanModelLimit`, `UserPlan`, `ReferralData`, internal API requests/responses.
+    *   Modified `MeetingSessionResponse`, `MeetingCreate`, `WhisperLiveData`.
+4.  **Refactor `whisperlive` Redis Usage (Minor Refactor):** **(PENDING - Requires `whisperlive` changes)**
+    *   Update `whisper_live/server.py` to use `redis_keys.py`.
+5.  **Enhance `admin-api`:** **(DONE - Basic CRUD & Routes)**
+    *   Refactored routes into `app/api/routes/core.py` and `app/api/routes/billing.py`.
+    *   Created `app/crud/` directory with `crud_plan.py`, `crud_user_plan.py`, `crud_referral.py`, `crud_user.py`, `crud_token.py`.
+    *   Implemented basic CRUD functions for Plan, UserPlan, ReferralData, User, Token.
+    *   Updated route handlers in `core.py` and `billing.py` to use CRUD functions.
+    *   Added `/admin/plans`, `/admin/users/{user_id}/plan` CRUD endpoints.
+    *   Added `/admin/internal/log_referral` endpoint (with placeholder user auth).
+    *   Added missing `/admin/users/{user_id}` (GET/DELETE) and `/admin/tokens/{token_value}` (DELETE) endpoints.
+6.  **Client-Side Implementation (UTM):** **(PENDING - External)**
+7.  **Database Migration Configuration:** **(DONE - Implicit via `init_db(drop_tables=True)`)**
+    *   Using drop/create strategy for development via `init_db`.
+    *   *Note: For production or persistent dev, proper Alembic migration generation required.*
 
-3.  **Transcription Quota Check (`bot-manager`, `billing-service`):**
-    *   **`billing-service` API Endpoint:**
-        *   Create `GET /internal/usage/check_quota` (or similar internal path).
-        *   Query Parameters: `user_id`, `model_identifier`.
-        *   Logic:
-            *   Find active `UserPlan` for `user_id`. If none, deny.
-            *   Determine current billing cycle start/end based on `UserPlan.billing_cycle_anchor`.
-            *   Fetch `PlanModelLimit.included_minutes` for the plan and `model_identifier`. If no limit defined, allow.
-            *   Fetch `UsageRecord.consumed_minutes` for the user, model, and current cycle.
-            *   Calculate `remaining_minutes = included_minutes - consumed_minutes`.
-            *   Return JSON: `{"quota_available": (remaining_minutes > 0), "remaining_minutes": remaining_minutes}`.
-    *   **`bot-manager` (`services/bot-manager/app/main.py` - `POST /bots` Handler):**
-        *   **Before** starting the Docker container:
-            *   Make an HTTP request to the `billing-service`'s `/internal/usage/check_quota` endpoint with `user_id` and requested `model_type`.
-            *   If the response indicates `quota_available` is `False`, return HTTP `402 Payment Required` or `403 Forbidden`.
+### Validation Tests (End of Phase 1)
 
-**Phase 4: Aggregation & Presentation**
+*   **Database Migration:** Schema created successfully via `init_db(drop_tables=True)` during container startup. Verified manually via API tests.
+*   **Unit Tests (`admin-api`):** *(PENDING - No unit tests written yet)*
+*   **Integration Tests (`admin-api`):** **(DONE - Basic Manual via `curl`)**
+    *   Verified `/admin/plans` (GET) returns `[]`.
+    *   Verified `/admin/users` (GET) works.
+    *   Verified `/admin/users/{user_id}/tokens` (POST) works.
+    *   *(Further `curl` tests for POST/PUT/DELETE on plans/userplans recommended).*
+*   **Manual Check:** *(PENDING - Requires more API calls)* Create a plan, assign it to a user.
 
-1.  **Usage Aggregation (`billing-service`):**
-    *   **Consumer:** Implement a background task (e.g., using `arq`, `Celery`, or simple `asyncio` loop) or a dedicated stream consumer process within `billing-service` listening to the `usage_events` Redis Stream.
-    *   **Logic:** For each `usage_update` event:
-        *   Find the user's active `UserPlan`.
-        *   Determine the correct billing period based on the event's timestamp and `UserPlan.billing_cycle_anchor`.
-        *   Find or create the `UsageRecord` for the `user_plan_id`, `model_identifier`, and `billing_period_start`/`end`.
-        *   Atomically update `UsageRecord.consumed_minutes` by adding `duration_seconds_added / 60.0`. Use database atomic operations (e.g., `UPDATE usage_records SET consumed_minutes = consumed_minutes + :added WHERE id = :id`) to prevent race conditions. Update `last_updated`.
+**Phase 2: Enforcement in `bot-manager` (Usage & Concurrency) (PENDING)**
 
-2.  **Plan/Subscription Management (`admin-api`):**
-    *   **Endpoints (`services/admin-api/app/routers/admin_billing.py` or similar):**
-        *   Add CRUD endpoints protected by `X-Admin-API-Key` authentication:
-            *   `/admin/plans` (POST, GET)
-            *   `/admin/plans/{plan_id}` (GET, PUT, DELETE) - Handle nested `PlanModelLimit` updates.
-            *   `/admin/users/{user_id}/plan` (POST, GET, PUT, DELETE) - Manage `UserPlan` assignments.
-    *   **CRUD Functions:** Implement corresponding database operations using SQLAlchemy/shared models.
+1.  **Modify `bot-manager` (`POST /bots`):**
+    *   Request body includes `model_identifier`.
+    *   **Refactor Redis Usage:** Update code to use helper functions/constants from `shared_models.redis_keys` for generating `bot_commands:{connectionId}` channel names and the planned `active_bots:{user_id}` key.
+    *   Call `admin-api` -> `GET /internal/check_limits` (to check usage against the specific model limit). *(Requires Phase 3)*
+    *   Process response, handle usage failure (`usage_ok: false`).
+    *   **Perform Overall Concurrency Check:** Use Redis Set (`active_bots:{user_id}`) to track total active bots for the user. Compare count against `concurrency_limit` received from `check_limits`.
+    *   If checks pass, start bot & add bot identifier (e.g., `meeting.id` or `container_id`) to Redis Set `active_bots:{user_id}`.
+2.  **Modify `bot-manager` (`DELETE /bots`, Background Task):**
+    *   **Refactor Redis Usage:** Update Redis key generation using `shared_models.redis_keys`.
+    *   Ensure the bot identifier is removed from the Redis Set `active_bots:{user_id}` upon successful termination.
 
-3.  **Billing/Usage View (Optional - Future):**
-    *   **`billing-service` API:** Add user-facing endpoints like `GET /billing/me/plan`, `GET /billing/me/usage`.
-    *   **`api-gateway`:** Expose these endpoints, forwarding requests authenticated with `X-API-Key` to `billing-service`.
+### Validation Tests (End of Phase 2)
 
-**Phase 5: Analytics**
+*   **Mocked Integration Test (`bot-manager`):**
+    *   Mock the HTTP response from `admin-api`'s `/internal/check_limits` endpoint.
+    *   Test `POST /bots`.
+*   **Integration Test (`bot-manager`):**
+    *   Requires `/internal/check_limits` in `admin-api` (from Phase 3) to be functional.
+    *   Test concurrency limit enforcement via Redis Set.
 
-1.  **Strategy Selection:** Choose between:
-    *   **Log-based (Simpler Start):** Structured JSON logging from services -> Log Collector (Filebeat/Fluentd) -> Storage/Visualizer (Elasticsearch/Loki + Kibana/Grafana).
-    *   **Event-based (More Robust):** Services publish detailed events to dedicated stream (Redis Streams/Kafka) -> Analytics Processor Service -> Analytics DB (TimescaleDB/ClickHouse) -> Visualizer (Grafana).
-    *   *Decision:* Assume Log-based for initial implementation.
+**Phase 3: Limit Checking & Quote API in `admin-api` (PENDING)**
 
-2.  **Structured Logging:**
-    *   **Libraries:** Use `python-json-logger` or similar in all Python services (`api-gateway`, `bot-manager`, `transcription-collector`, `billing-service`).
-    *   **Key Events to Log (JSON format):**
-        *   `api-gateway`: API request start/end (user_id, endpoint, method, status_code, latency). Rate limit hit.
-        *   `bot-manager`: Bot start request (user_id, model_type), bot start success/failure (reason), bot stop request, concurrent limit hit, quota limit hit.
-        *   `transcription-collector`: Usage update published (user_id, model, duration). Errors processing stream.
-        *   `billing-service`: Usage record updated, quota check performed, plan created/updated. Errors consuming usage stream.
+1.  **Modify `transcription-collector` (Usage Aggregation):**
+    *   Inject SQLAlchemy session and `aioredis.Redis` client.
+    *   **Refactor Redis Usage:** Use `shared_models.redis_keys`.
+    *   **Modify `process_session_start_event`:** Parse `model_identifier`, create/update `MeetingSession`, initialize Redis Hash `session_agg:{session_uid}`. *(Requires Prerequisite)*
+    *   **Modify `transcription` event processing:** Update Redis Hash (`max_end_time`, `total_duration`), add to `dirty_sessions` Set.
+    *   **Implement Background Flush Task:** Periodically update `MeetingSession` in DB from Redis cache (`dirty_sessions`).
+2.  **Implement Endpoints in `admin-api`:**
+    *   **Internal Limit Check (`GET /internal/check_limits`):** Implement logic using `UserPlan`, `PlanModelLimit`, and **summing `MeetingSession.max_end_time`** within billing period.
+    *   **User-Facing Quote API (`GET /usage/quote`):** Implement logic using `MeetingSession` filters and **summing `MeetingSession.max_end_time`**.
 
-3.  **Log Collection (`docker-compose.yml`):**
-    *   Add `Filebeat` or `Fluentd` service.
-    *   Configure volume mounts to access Docker container logs (e.g., `/var/lib/docker/containers`).
-    *   Configure processors to parse JSON logs and add necessary metadata.
-    *   Configure output to Elasticsearch or Loki.
+### Validation Tests (End of Phase 3)
 
-4.  **Storage & Visualization (`docker-compose.yml`):**
-    *   Add `Elasticsearch` & `Kibana` or `Loki` & `Grafana` services.
-    *   Build initial dashboards in Kibana/Grafana for:
-        *   API Usage (requests/min, errors, latency by user/endpoint).
-        *   Transcription Volume (minutes per model per user/plan).
-        *   Bot Activity (active bots, starts/stops).
-        *   Billing System Health (usage processing rate, errors).
+*   Unit/Integration Tests (`transcription-collector`): Verify Redis updates and DB flush.
+*   Unit/Integration Tests (`admin-api`): Verify limit/quote endpoint logic.
+*   End-to-End Test: Verify limit enforcement and quote API results.
 
-**Phase 6: Testing & Deployment**
+**Phase 4: Analytics & Logging (PENDING)**
 
-1.  **Unit Tests:** Cover new logic: rate limiting, quota checks, usage calculation, stream processing, DB CRUD operations, API endpoint logic.
-2.  **Integration Tests:** Test interactions between services:
-    *   API Gateway <-> Admin API/Billing Service (Auth & Limits).
-    *   Bot Manager <-> Billing Service (Concurrency & Quota).
-    *   WhisperLive -> Collector -> Billing Service (Usage Pipeline).
-3.  **End-to-End Tests:** Simulate full user workflows:
-    *   Sign up, get assigned plan, hit rate limit, start bot, get transcription, exceed quota, view usage (if implemented).
-4.  **Deployment:**
-    *   Update CI/CD pipelines to build/test/deploy the new `billing-service`.
-    *   Handle database migrations for new tables/schemas.
-    *   Roll out configuration changes for existing services.
-    *   Deploy analytics stack if chosen.
+*   Update logging in `admin-api`, `transcription-collector`.
+*   Dashboards remain similar.
 
-This plan provides a structured approach to implementing the required features across the Vexa microservices architecture. 
+**Phase 5: Testing & Deployment (PENDING)**
+
+*   Update tests for `admin-api` Phase 3 endpoints.
+*   Update integration/E2E tests.
+*   Deployment updates.
