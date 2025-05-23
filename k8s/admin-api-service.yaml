@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+    kompose.version: 1.31.2 (a92241f79)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: admin-api
+  name: admin-api
+spec:
+  ports:
+    - name: "8057"
+      port: 8057
+      targetPort: 8001
+  selector:
+    io.kompose.service: admin-api
+status:
+  loadBalancer: {}

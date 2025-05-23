@@ -1,6 +1,7 @@
 from kubernetes import client, config
 import os
 import logging
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class KubernetesClient:
         self.bot_image = os.getenv("BOT_IMAGE", "gcr.io/your-project/bot:latest")
         self.transcription_service = os.getenv("TRANSCRIPTION_SERVICE", "transcription-service:8080")
     
-    def create_bot_pod(self, user_id, meeting_id):
+    def create_bot_pod(self, user_id: str, meeting_id: str, env_vars: Optional[Dict[str, str]] = None, image_override: Optional[str] = None):
         """Create a new bot pod for specific user and meeting"""
         pod_name = f"bot-{user_id}-{meeting_id}"
         
@@ -42,18 +43,23 @@ class KubernetesClient:
                 logger.error(f"Error checking pod existence: {e}")
                 raise
         
-        # Create pod
+        # Build env list
+        env_list = [
+            client.V1EnvVar(name="USER_ID", value=user_id),
+            client.V1EnvVar(name="MEETING_ID", value=meeting_id),
+            client.V1EnvVar(name="TRANSCRIPTION_SERVICE", value=self.transcription_service),
+        ]
+        if env_vars:
+            for k, v in env_vars.items():
+                env_list.append(client.V1EnvVar(name=k, value=v))
+
         container = client.V1Container(
             name="bot",
-            image=self.bot_image,
-            env=[
-                client.V1EnvVar(name="USER_ID", value=user_id),
-                client.V1EnvVar(name="MEETING_ID", value=meeting_id),
-                client.V1EnvVar(name="TRANSCRIPTION_SERVICE", value=self.transcription_service)
-            ],
+            image=image_override or self.bot_image,
+            env=env_list,
             resources=client.V1ResourceRequirements(
-                requests={"cpu": "100m", "memory": "128Mi"},
-                limits={"cpu": "500m", "memory": "256Mi"}
+                requests={"cpu": "100m", "memory": "512Mi"},
+                limits={"cpu": "500m", "memory": "1Gi"}
             )
         )
         

@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+    kompose.version: 1.31.2 (a92241f79)
+    traefik.enable: "true"
+    traefik.http.middlewares.wscpu-hdr.headers.crh.Connection: upgrade
+    traefik.http.middlewares.wscpu-hdr.headers.crh.Upgrade: websocket
+    traefik.http.routers.whisperlive-cpu.entrypoints: web
+    traefik.http.routers.whisperlive-cpu.middlewares: wscpu-hdr
+    traefik.http.routers.whisperlive-cpu.rule: Host(`whisperlive-cpu.localhost`)
+    traefik.http.services.whisperlive-cpu.loadbalancer.server.port: "9092"
+  creationTimestamp: null
+  labels:
+    io.kompose.service: whisperlive-cpu
+  name: whisperlive-cpu
+spec:
+  ports:
+    - name: "9092"
+      port: 9092
+      targetPort: 9092
+    - name: "9093"
+      port: 9093
+      targetPort: 9093
+  selector:
+    io.kompose.service: whisperlive-cpu
+status:
+  loadBalancer: {}

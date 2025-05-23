@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+    kompose.version: 1.31.2 (a92241f79)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: traefik
+  name: traefik
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: traefik
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+        kompose.version: 1.31.2 (a92241f79)
+      creationTimestamp: null
+      labels:
+        io.kompose.network/vexa-vexa-default: "true"
+        io.kompose.network/vexa-whispernet: "true"
+        io.kompose.service: traefik
+    spec:
+      containers:
+        - args:
+            - --api.insecure=true
+            - --providers.docker=true
+            - --providers.docker.exposedbydefault=false
+            - --entrypoints.web.address=:80
+            - --log.level=DEBUG
+          image: traefik:v2.10
+          livenessProbe:
+            exec:
+              command:
+                - wget
+                - --spider
+                - --quiet
+                - http://localhost/ping
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+          name: traefik
+          ports:
+            - containerPort: 80
+              protocol: TCP
+            - containerPort: 8080
+              protocol: TCP
+          resources: {}
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: traefik-claim0
+              readOnly: true
+            - mountPath: /etc/traefik/traefik.toml
+              name: traefik-claim1
+              readOnly: true
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+        - name: traefik-claim0
+          persistentVolumeClaim:
+            claimName: traefik-claim0
+            readOnly: true
+        - name: traefik-claim1
+          persistentVolumeClaim:
+            claimName: traefik-claim1
+            readOnly: true
+status: {}

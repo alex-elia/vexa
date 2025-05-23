@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+    kompose.version: 1.31.2 (a92241f79)
+    traefik.enable: "true"
+    traefik.http.middlewares.wscpu-hdr.headers.crh.Connection: upgrade
+    traefik.http.middlewares.wscpu-hdr.headers.crh.Upgrade: websocket
+    traefik.http.routers.whisperlive-cpu.entrypoints: web
+    traefik.http.routers.whisperlive-cpu.middlewares: wscpu-hdr
+    traefik.http.routers.whisperlive-cpu.rule: Host(`whisperlive-cpu.localhost`)
+    traefik.http.services.whisperlive-cpu.loadbalancer.server.port: "9092"
+  creationTimestamp: null
+  labels:
+    io.kompose.service: whisperlive-cpu
+  name: whisperlive-cpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: whisperlive-cpu
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+        kompose.version: 1.31.2 (a92241f79)
+        traefik.enable: "true"
+        traefik.http.middlewares.wscpu-hdr.headers.crh.Connection: upgrade
+        traefik.http.middlewares.wscpu-hdr.headers.crh.Upgrade: websocket
+        traefik.http.routers.whisperlive-cpu.entrypoints: web
+        traefik.http.routers.whisperlive-cpu.middlewares: wscpu-hdr
+        traefik.http.routers.whisperlive-cpu.rule: Host(`whisperlive-cpu.localhost`)
+        traefik.http.services.whisperlive-cpu.loadbalancer.server.port: "9092"
+      creationTimestamp: null
+      labels:
+        io.kompose.network/vexa-vexa-default: "true"
+        io.kompose.network/vexa-whispernet: "true"
+        io.kompose.service: whisperlive-cpu
+    spec:
+      containers:
+        - args:
+            - -c
+            - |
+              if [ "${DEVICE_TYPE}" = "cpu" ]; then
+                echo 'INFO: DEVICE_TYPE is cpu, starting WhisperLive CPU service.' &&
+                exec python3 /app/run_server.py --port 9092 --backend faster_whisper -fw /root/.cache/huggingface/hub/models--Systran--faster-whisper-tiny/snapshots/d90ca5fe260221311c53c58e660288d3deb8d356;
+              else
+                echo "INFO: DEVICE_TYPE is not cpu (it is '${DEVICE_TYPE}'), WhisperLive CPU service will not start. Sleeping indefinitely." &&
+                sleep infinity;
+              fi
+          command:
+            - /bin/sh
+          env:
+            - name: LANGUAGE_DETECTION_SEGMENTS
+              value: "10"
+            - name: REDIS_DB
+              value: "0"
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_STREAM_NAME
+              value: transcription_segments
+            - name: REDIS_STREAM_URL
+              value: redis://redis:6379/0/transcription_segments
+            - name: TRANSCRIPTION_COLLECTOR_URL
+              value: redis://redis:6379/0/transcription_segments
+            - name: VAD_FILTER_THRESHOLD
+              value: "0.5"
+            - name: DEVICE_TYPE
+              value: cpu
+          image: vexa-whisperlive-cpu:dev
+          livenessProbe:
+            exec:
+              command:
+                - curl
+                - -f
+                - http://localhost:9093/health
+            failureThreshold: 3
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+          name: whisperlive-cpu
+          ports:
+            - containerPort: 9092
+              protocol: TCP
+            - containerPort: 9093
+              protocol: TCP
+          resources: {}
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+status: {}

@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+    kompose.version: 1.31.2 (a92241f79)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: bot-manager
+  name: bot-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: bot-manager
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+        kompose.version: 1.31.2 (a92241f79)
+      creationTimestamp: null
+      labels:
+        io.kompose.network/vexa-vexa-default: "true"
+        io.kompose.service: bot-manager
+    spec:
+      containers:
+        - env:
+            - name: BOT_IMAGE_NAME
+              value: vexa-bot:dev
+            - name: DB_HOST
+              value: postgres
+            - name: DB_NAME
+              value: vexa
+            - name: DB_PASSWORD
+              value: postgres
+            - name: DB_PORT
+              value: "5438"
+            - name: DB_USER
+              value: postgres
+            - name: DEVICE_TYPE
+            - name: DOCKER_HOST
+              value: unix://var/run/docker.sock
+            - name: DOCKER_NETWORK
+              value: vexa_vexa_default
+            - name: LOG_LEVEL
+              value: DEBUG
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+            - name: WHISPER_LIVE_CPU_URL
+              value: ws://whisperlive-cpu:9092
+            - name: WHISPER_LIVE_GPU_URL
+              value: ws://whisperlive:9090
+          image: docker.io/library/vexa-bot-manager:dev
+          name: bot-manager
+          resources: {}
+          volumeMounts: []
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes: []
+status: {}

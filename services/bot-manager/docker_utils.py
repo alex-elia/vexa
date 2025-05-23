@@ -27,6 +27,13 @@ from sqlalchemy.future import select
 from shared_models.models import User, MeetingSession
 # <--- END ADD
 
+# Optional: allow switching to Kubernetes backend instead of Docker for local kind usage
+try:
+    from app.kubernetes.client import KubernetesClient
+except ModuleNotFoundError:
+    # The Kubernetes backend is optional; ignore if dependencies are missing
+    KubernetesClient = None
+
 # Assuming these are still needed from config or env
 DOCKER_HOST = os.environ.get("DOCKER_HOST", "unix://var/run/docker.sock")
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "vexa_default")
@@ -34,6 +41,9 @@ BOT_IMAGE_NAME = os.environ.get("BOT_IMAGE_NAME", "vexa-bot:dev")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "cuda").lower()
+
+# Optional: allow switching to Kubernetes backend instead of Docker for local kind usage
+BOT_BACKEND = os.environ.get("BOT_BACKEND", "docker").lower()
 
 logger = logging.getLogger("bot_manager.docker_utils")
 
@@ -141,23 +151,76 @@ async def start_bot_container(
     language: Optional[str],
     task: Optional[str]
 ) -> Optional[tuple[str, str]]:
-    """
-    Starts a vexa-bot container via requests_unixsocket AFTER checking user limit.
+    """Start a bot *container* (Docker) **or** *pod* (Kubernetes) depending on BOT_BACKEND.
 
-    Args:
-        user_id: The ID of the user requesting the bot.
-        meeting_id: Internal database ID of the meeting.
-        meeting_url: The URL for the bot to join.
-        platform: The meeting platform (external name).
-        bot_name: An optional name for the bot inside the meeting.
-        user_token: The API token of the user requesting the bot.
-        native_meeting_id: The platform-specific meeting ID (e.g., 'xyz-abc-pdq').
-        language: Optional language code for transcription.
-        task: Optional transcription task ('transcribe' or 'translate').
-        
-    Returns:
-        A tuple (container_id, connection_id) if successful, None otherwise.
+    When `BOT_BACKEND=k8s` (or `BOT_BACKEND` set to anything starting with "k"), we delegate to
+    `KubernetesClient.create_bot_pod` and treat the returned pod name as the *container_id* so that
+    the rest of Bot-manager keeps working without code changes.
+
+    All original arguments are kept intact so this function can be used transparently by the caller.
     """
+    # Decide backend early
+    use_k8s_backend = BOT_BACKEND.startswith("k") and KubernetesClient is not None
+
+    # Fast-path for Kubernetes backend – no Docker socket, no limit check yet
+    if use_k8s_backend:
+        try:
+            logger.info("[K8S] Creating bot pod via KubernetesClient backend …")
+
+            # Generate deterministic pod name inside KubernetesClient but we still create connection_id here
+            connection_id = str(uuid.uuid4())
+
+            # Build BOT_CONFIG similar to Docker path (keep keys identical)
+            bot_config_payload = {
+                "meeting_id": meeting_id,
+                "platform": platform,
+                "meetingUrl": meeting_url,
+                "botName": bot_name or f"VexaBot-{uuid.uuid4().hex[:6]}",
+                "token": user_token,
+                "nativeMeetingId": native_meeting_id,
+                "connectionId": connection_id,
+                "language": language,
+                "task": task,
+                "redisUrl": REDIS_URL,
+                "automaticLeave": {
+                    "waitingRoomTimeout": 300000,
+                    "noOneJoinedTimeout": 300000,
+                    "everyoneLeftTimeout": 300000
+                }
+            }
+            bot_config_payload = {k: v for k, v in bot_config_payload.items() if v is not None}
+            bot_config_json = json.dumps(bot_config_payload)
+
+            # WhisperLive URL selection
+            whisper_live_url = os.getenv('WHISPER_LIVE_CPU_URL', 'ws://whisperlive-cpu:9092')
+            if DEVICE_TYPE == 'cuda':
+                whisper_live_url = os.getenv('WHISPER_LIVE_GPU_URL', 'ws://whisperlive:9090')
+
+            env_vars = {
+                "BOT_CONFIG": bot_config_json,
+                "WHISPER_LIVE_URL": whisper_live_url,
+                "LOG_LEVEL": os.getenv('LOG_LEVEL', 'INFO').upper(),
+            }
+
+            k8s_client = KubernetesClient()
+            result = k8s_client.create_bot_pod(
+                str(user_id),
+                str(meeting_id),
+                env_vars=env_vars,
+                image_override=BOT_IMAGE_NAME,
+            )
+
+            pod_name = result.get("pod_name") if isinstance(result, dict) else None
+            if pod_name:
+                logger.info(f"[K8S] Successfully created pod {pod_name} for meeting {meeting_id}")
+                return pod_name, connection_id
+            else:
+                logger.error("[K8S] create_bot_pod did not return pod_name – backend call failed?")
+                return None, None
+        except Exception as e:
+            logger.error(f"[K8S] Unexpected error creating bot pod: {e}", exc_info=True)
+            return None, None
+
     # === START: Bot Limit Check ===
     try:
         # Fetch user details (including max_concurrent_bots)
@@ -224,7 +287,9 @@ async def start_bot_container(
          raise HTTPException(status_code=500, detail="Failed to verify bot limit.")
     # === END: Bot Limit Check ===
 
-    # --- Original start_bot_container logic (using requests_unixsocket) --- 
+    # ----------------------------------------------------------------------
+    # DOCKER BACKEND (default)
+    # ----------------------------------------------------------------------
     session = get_socket_session()
     if not session:
         logger.error("Cannot start bot container, requests_unixsocket session not available.")

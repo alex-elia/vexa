@@ -19,6 +19,10 @@ ENV OMP_NUM_THREADS=4
 # Set working directory
 WORKDIR /app
 
+# Copy the downloaded models from the build context
+# The download_model.py script places models in ./hub relative to docker-compose.yml (build context root)
+COPY hub /root/.cache/huggingface/hub
+
 # Copy only the requirements file first
 COPY services/WhisperLive/requirements/server.txt /tmp/requirements.txt
 

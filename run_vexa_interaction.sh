@@ -1,4 +1,5 @@
 #!/bin/bash
+set -x # Enable command tracing
 
 # Vexa Bot Interaction Script
 
@@ -138,7 +139,7 @@ END
 )
 
 # Use ADMIN_API_URL for admin actions
-CREATE_USER_RESPONSE=$(curl -s -X POST \
+CREATE_USER_RESPONSE=$(curl -v -X POST \
     -H "Content-Type: application/json" \
     -H "X-Admin-API-Key: $ADMIN_TOKEN" \
     -d "$CREATE_USER_PAYLOAD" \
@@ -222,7 +223,7 @@ END
 )
 
 # Use BASE_URL for user actions
-REQUEST_BOT_RESPONSE=$(curl -s -X POST \
+REQUEST_BOT_RESPONSE=$(curl -v -X POST \
     -H "Content-Type: application/json" \
     -H "X-API-Key: $USER_API_KEY" \
     -d "$REQUEST_BOT_PAYLOAD" \

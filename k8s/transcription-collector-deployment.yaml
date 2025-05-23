@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+    kompose.version: 1.31.2 (a92241f79)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: transcription-collector
+  name: transcription-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: transcription-collector
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert --profile cpu -f docker-compose.yml -o k8s/
+        kompose.version: 1.31.2 (a92241f79)
+      creationTimestamp: null
+      labels:
+        io.kompose.network/vexa-vexa-default: "true"
+        io.kompose.service: transcription-collector
+    spec:
+      containers:
+        - env:
+            - name: BACKGROUND_TASK_INTERVAL
+              value: "10"
+            - name: DB_HOST
+              value: postgres
+            - name: DB_NAME
+              value: vexa
+            - name: DB_PASSWORD
+              value: postgres
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: postgres
+            - name: IMMUTABILITY_THRESHOLD
+              value: "30"
+            - name: LOG_LEVEL
+              value: DEBUG
+            - name: REDIS_CLEANUP_THRESHOLD
+              value: "86400"
+            - name: REDIS_CONSUMER_GROUP
+              value: collector_group
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_SEGMENT_TTL
+              value: "3600"
+            - name: REDIS_STREAM_BLOCK_MS
+              value: "2000"
+            - name: REDIS_STREAM_NAME
+              value: transcription_segments
+            - name: REDIS_STREAM_READ_COUNT
+              value: "10"
+          image: docker.io/library/vexa-transcription-collector:dev
+          name: transcription-collector
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          resources: {}
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+status: {}

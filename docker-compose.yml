@@ -155,12 +155,10 @@ services:
   # CPU version of WhisperLive for users without GPU
   whisperlive-cpu:
     profiles: ["cpu"]
+    image: vexa-whisperlive-cpu:dev
     build:
       context: .
       dockerfile: services/WhisperLive/Dockerfile.cpu
-    volumes:
-      - ./hub:/root/.cache/huggingface/hub
-      - ./services/WhisperLive/models:/app/models
     environment:
       - REDIS_STREAM_URL=redis://redis:6379/0/transcription_segments
       - TRANSCRIPTION_COLLECTOR_URL=redis://redis:6379/0/transcription_segments
@@ -211,9 +209,9 @@ services:
       - "traefik.http.routers.whisperlive-cpu.rule=Host(`whisperlive-cpu.localhost`)"
       - "traefik.http.routers.whisperlive-cpu.entrypoints=web"
       - "traefik.http.services.whisperlive-cpu.loadbalancer.server.port=9092"
-      - "traefik.http.middlewares.whisperlive-cpu-headers.headers.customrequestheaders.Connection=upgrade"
-      - "traefik.http.middlewares.whisperlive-cpu-headers.headers.customrequestheaders.Upgrade=websocket"
-      - "traefik.http.routers.whisperlive-cpu.middlewares=whisperlive-cpu-headers"
+      - "traefik.http.middlewares.wscpu-hdr.headers.crh.Connection=upgrade"
+      - "traefik.http.middlewares.wscpu-hdr.headers.crh.Upgrade=websocket"
+      - "traefik.http.routers.whisperlive-cpu.middlewares=wscpu-hdr"
 
   # Replace nginx load-balancer with Traefik
   traefik:
