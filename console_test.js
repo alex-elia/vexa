@@ -109,21 +109,16 @@
     function logSpeakerEvent(participantElement, isSpeaking) {
         const participantId = getParticipantId(participantElement);
         const participantName = getParticipantName(participantElement);
-        const previousState = speakingStates.get(participantId);
+        // const previousState = speakingStates.get(participantId); // Previous state no longer gates the primary log
 
-        if (isSpeaking && !previousState) { // Actual START event
-            console.log(`%c🎤 ${participantName} started speaking`, 'color: green; font-weight: bold;');
-            speakingStates.set(participantId, true);
-        } else if (previousState === undefined && isSpeaking) { // Initial detection and is speaking
-            console.log(`%c🎤 ${participantName} started speaking (initial detection)`, 'color: blue; font-weight: bold;');
-            speakingStates.set(participantId, true);
-        } else if (!isSpeaking && previousState) { // Actual STOP event - update state but no log
-            speakingStates.set(participantId, false);
-        } else if (previousState === undefined && !isSpeaking) { // Initial detection and is not speaking - update state but no log
+        if (isSpeaking) {
+            // Log every time the participant is detected as speaking
+            console.log(`%c🎤 ${participantName} started speaking (dynamic check)`, 'color: dodgerblue; font-weight: normal;');
+            speakingStates.set(participantId, true); // Keep state updated
+        } else {
+            // If not speaking, just update the state. No log for not speaking.
             speakingStates.set(participantId, false);
         }
-        // If isSpeaking is true and previousState is true (still speaking), do nothing to log, state is same.
-        // If isSpeaking is false and previousState is false (still not speaking), do nothing to log, state is same.
     }
 
     // --- Main Logic ---
