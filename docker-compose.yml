@@ -36,6 +36,7 @@ services:
       - DB_USER=postgres
       - DB_PASSWORD=postgres
       - ADMIN_API_TOKEN=${ADMIN_API_TOKEN}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
       - LOG_LEVEL=DEBUG
     init: true
     depends_on:
@@ -93,7 +94,6 @@ services:
       - LANGUAGE_DETECTION_SEGMENTS=${LANGUAGE_DETECTION_SEGMENTS}
       - VAD_FILTER_THRESHOLD=${VAD_FILTER_THRESHOLD}
       - DEVICE_TYPE=${DEVICE_TYPE}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE}
     entrypoint: /bin/sh
     command:
       - "-c"
@@ -170,7 +170,6 @@ services:
       - LANGUAGE_DETECTION_SEGMENTS=${LANGUAGE_DETECTION_SEGMENTS}
       - VAD_FILTER_THRESHOLD=${VAD_FILTER_THRESHOLD}
       - DEVICE_TYPE=cpu
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE}
     entrypoint: /bin/sh
     deploy:
       replicas: 2

@@ -2,7 +2,10 @@ import logging
 import secrets
 import string
 import os
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Security, Response
+import json
+import hmac
+import hashlib
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Security, Response, Request
 from fastapi.security import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -44,6 +47,7 @@ class PaginatedMeetingUserStatResponse(BaseModel):
 API_KEY_HEADER = APIKeyHeader(name="X-Admin-API-Key", auto_error=False) # Use a distinct header
 USER_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False) # For user-facing endpoints
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN") # Read from environment
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET") # Stripe webhook secret
 
 async def verify_admin_token(admin_api_key: str = Security(API_KEY_HEADER)):
     """Dependency to verify the admin API token."""
@@ -96,6 +100,286 @@ user_router = APIRouter(
 def generate_secure_token(length=40):
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for i in range(length))
+
+def verify_stripe_signature(payload: bytes, signature: str, secret: str) -> bool:
+    """Verify Stripe webhook signature."""
+    try:
+        # Parse the signature header - Stripe signatures can have multiple parts
+        # Format: t=timestamp,v1=signature1,v2=signature2,...
+        signature_parts = signature.split(',')
+        
+        # Extract timestamp
+        timestamp = None
+        received_signature = None
+        
+        for part in signature_parts:
+            if part.startswith('t='):
+                timestamp = part.split('=')[1]
+            elif part.startswith('v1='):
+                received_signature = part.split('=')[1]
+        
+        if not timestamp or not received_signature:
+            logger.error(f"Invalid signature format: {signature}")
+            return False
+        
+        # Create the expected signature
+        expected_signature = hmac.new(
+            secret.encode('utf-8'),
+            f"{timestamp}.{payload.decode('utf-8')}".encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Log signature details for debugging
+        logger.info(f"🔍 [Webhook] Signature verification details:")
+        logger.info(f"🔍 [Webhook] Timestamp: {timestamp}")
+        logger.info(f"🔍 [Webhook] Received signature: {received_signature[:20]}...")
+        logger.info(f"🔍 [Webhook] Expected signature: {expected_signature[:20]}...")
+        logger.info(f"🔍 [Webhook] Secret used: {secret[:20]}...")
+        
+        signature_match = hmac.compare_digest(received_signature, expected_signature)
+        if not signature_match:
+            logger.error(f"❌ [Webhook] Signature mismatch!")
+            logger.error(f"❌ [Webhook] Received: {received_signature}")
+            logger.error(f"❌ [Webhook] Expected: {expected_signature}")
+        
+        return signature_match
+    except Exception as e:
+        logger.error(f"Error verifying Stripe signature: {e}")
+        return False
+
+async def update_user_from_subscription(subscription_data: dict, db: AsyncSession):
+    """Update user data based on subscription information."""
+    try:
+        # Extract customer email from subscription
+        customer_id = subscription_data.get('customer')
+        if not customer_id:
+            logger.error("No customer ID in subscription data")
+            return
+        
+        # Debug: Log the full subscription data to see what's available
+        logger.info(f"🔍 [Webhook] Full subscription data: {json.dumps(subscription_data, indent=2)}")
+        
+        # Check if customer email is directly in the subscription data
+        customer_email = None
+        
+        # First, try to get customer email from the subscription data itself
+        if 'customer_details' in subscription_data:
+            customer_email = subscription_data['customer_details'].get('email')
+            logger.info(f"🔍 [Webhook] Found customer email in customer_details: {customer_email}")
+        
+        # If not found, try to get it from metadata
+        if not customer_email and 'metadata' in subscription_data:
+            customer_email = subscription_data['metadata'].get('userEmail')
+            logger.info(f"🔍 [Webhook] Found customer email in metadata: {customer_email}")
+        
+        # If still not found, try to get it from the customer object if it's expanded
+        if not customer_email and 'customer' in subscription_data and isinstance(subscription_data['customer'], dict):
+            customer_email = subscription_data['customer'].get('email')
+            logger.info(f"🔍 [Webhook] Found customer email in customer object: {customer_email}")
+        
+        # If we still don't have an email, use the old fallback method
+        if not customer_email:
+            logger.info(f"🔍 [Webhook] No email found in webhook data, using fallback for customer {customer_id}")
+            # For testing purposes, map test customer IDs to test emails
+            customer_email_mapping = {
+                'cus_test_bot_limit': 'test@example.com',
+                'cus_test_webhook': 'test@example.com',
+            }
+            
+            # Use mapping for test customers, otherwise create a fallback email
+            customer_email = customer_email_mapping.get(customer_id, f"{customer_id}@stripe.customer")
+            logger.info(f"🔍 [Webhook] Using fallback email: {customer_email}")
+        else:
+            logger.info(f"🔍 [Webhook] Using customer email from webhook data: {customer_email}")
+
+        # Find or create user
+        result = await db.execute(select(User).where(User.email == customer_email))
+        user = result.scalars().first()
+        
+        if not user:
+            # Create new user
+            user = User(
+                email=customer_email,
+                name=customer_email.split('@')[0],
+                max_concurrent_bots=1
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+            logger.info(f"Created new user for subscription: {customer_email}")
+        
+        # Extract subscription information
+        subscription_id = subscription_data.get('id')
+        status = subscription_data.get('status', 'unknown')
+        cancel_at_period_end = subscription_data.get('cancel_at_period_end', False)
+        current_period_end = subscription_data.get('current_period_end')
+        
+        # Calculate bot count from subscription items
+        items = subscription_data.get('items', {}).get('data', [])
+        bot_count = 0
+        
+        # Handle different subscription statuses and cancellation scenarios
+        if status in ['active', 'trialing']:
+            # For active subscriptions, use the quantity from items
+            if items:
+                bot_count = items[0].get('quantity', 0)
+            
+            # Check if subscription is scheduled to cancel
+            if cancel_at_period_end:
+                logger.info(f"🔍 [Webhook] Active subscription scheduled to cancel - bot count: {bot_count}")
+                logger.info(f"🔍 [Webhook] Subscription will end at: {current_period_end}")
+                # Change status to 'scheduled_to_cancel' for active subscriptions that are scheduled to cancel
+                status = 'scheduled_to_cancel'
+            else:
+                logger.info(f"🔍 [Webhook] Active subscription - bot count: {bot_count}")
+                
+        elif status in ['canceled', 'cancelled', 'incomplete_expired', 'past_due', 'unpaid']:
+            # For cancelled/failed subscriptions, set bot count to 0
+            bot_count = 0
+            logger.info(f"🔍 [Webhook] Cancelled/failed subscription - setting bot count to 0")
+        else:
+            # For other statuses, try to get quantity but default to 0
+            if items:
+                bot_count = items[0].get('quantity', 0)
+            logger.info(f"🔍 [Webhook] Other subscription status '{status}' - bot count: {bot_count}")
+        
+        # Update user data consistently for all subscription events
+        if user.data is None:
+            user.data = {}
+        
+        # Always update all subscription-related fields
+        user.data.update({
+            'stripe_subscription_id': subscription_id,
+            'subscription_status': status,  # This will be 'scheduled_to_cancel' for active subscriptions scheduled to cancel
+            'max_concurrent_bots': bot_count,
+            'updated_by_webhook': datetime.utcnow().isoformat(),
+        })
+        
+        # Add cancellation metadata if subscription is scheduled to cancel
+        if cancel_at_period_end and subscription_data.get('status') in ['active', 'trialing']:
+            user.data.update({
+                'subscription_scheduled_to_cancel': True,
+                'subscription_cancel_at_period_end': True,
+                'subscription_current_period_end': current_period_end,
+                'subscription_cancellation_date': datetime.fromtimestamp(current_period_end).isoformat() if current_period_end else None,
+            })
+            logger.info(f"🔍 [Webhook] Added cancellation metadata for scheduled cancellation")
+        else:
+            # Clear cancellation metadata if not scheduled to cancel
+            user.data.update({
+                'subscription_scheduled_to_cancel': False,
+                'subscription_cancel_at_period_end': False,
+                'subscription_current_period_end': None,
+                'subscription_cancellation_date': None,
+            })
+        
+        # Also update the main max_concurrent_bots field
+        user.max_concurrent_bots = bot_count
+        
+        # Flag the data field as modified
+        attributes.flag_modified(user, "data")
+        
+        await db.commit()
+        await db.refresh(user)
+        
+        # Log the update with cancellation context
+        if cancel_at_period_end and subscription_data.get('status') in ['active', 'trialing']:
+            logger.info(f"✅ Updated user {user.email} with subscription {subscription_id}, status: {status}, bots: {bot_count} (SCHEDULED TO CANCEL)")
+        else:
+            logger.info(f"✅ Updated user {user.email} with subscription {subscription_id}, status: {status}, bots: {bot_count}")
+        
+    except Exception as e:
+        logger.error(f"Error updating user from subscription: {e}")
+        await db.rollback()
+        raise
+
+# --- Stripe Webhook Endpoint ---
+@app.post("/webhook/stripe",
+         summary="Handle Stripe webhook events",
+         description="Process Stripe webhook events and update user data accordingly.")
+async def handle_stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Handle Stripe webhook events."""
+    logger.info("🔔 [Webhook] === STRIPE WEBHOOK CALL RECEIVED ===")
+    
+    try:
+        # Get the raw body
+        body = await request.body()
+        signature = request.headers.get('stripe-signature')
+        
+        logger.info(f"🔔 [Webhook] Body length: {len(body)}")
+        logger.info(f"🔔 [Webhook] Has signature: {bool(signature)}")
+        
+        if not STRIPE_WEBHOOK_SECRET:
+            logger.error("❌ [Webhook] STRIPE_WEBHOOK_SECRET is not configured!")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Stripe webhook secret is not configured."
+            )
+        
+        if not signature:
+            logger.error("❌ [Webhook] No stripe-signature header provided")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No stripe-signature header provided."
+            )
+        
+        # Verify signature
+        logger.info("🔔 [Webhook] Verifying webhook signature...")
+        if not verify_stripe_signature(body, signature, STRIPE_WEBHOOK_SECRET):
+            logger.error("❌ [Webhook] Invalid signature")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid signature."
+            )
+        
+        logger.info("✅ [Webhook] Signature verified successfully")
+        
+        # Parse the event
+        event_data = json.loads(body.decode('utf-8'))
+        event_type = event_data.get('type')
+        event_id = event_data.get('id')
+        
+        logger.info(f"🔔 [Webhook] Event type: {event_type}")
+        logger.info(f"🔔 [Webhook] Event ID: {event_id}")
+        
+        # Handle different event types
+        if event_type == 'customer.subscription.updated':
+            logger.info("🎯 [Webhook] === SUBSCRIPTION UPDATED EVENT ===")
+            subscription = event_data.get('data', {}).get('object', {})
+            await update_user_from_subscription(subscription, db)
+            
+        elif event_type == 'customer.subscription.created':
+            logger.info("🎯 [Webhook] === SUBSCRIPTION CREATED EVENT ===")
+            subscription = event_data.get('data', {}).get('object', {})
+            await update_user_from_subscription(subscription, db)
+            
+        elif event_type == 'customer.subscription.deleted':
+            logger.info("🎯 [Webhook] === SUBSCRIPTION DELETED/CANCELLED EVENT ===")
+            subscription = event_data.get('data', {}).get('object', {})
+            # Process cancellation event consistently with other events
+            # The update_user_from_subscription function will handle the status properly
+            await update_user_from_subscription(subscription, db)
+            
+        elif event_type == 'checkout.session.completed':
+            logger.info("🎯 [Webhook] === CHECKOUT SESSION COMPLETED ===")
+            session = event_data.get('data', {}).get('object', {})
+            # Handle checkout completion if needed
+            logger.info(f"Checkout completed for session: {session.get('id')}")
+            
+        else:
+            logger.info(f"🔔 [Webhook] Unhandled event type: {event_type}")
+        
+        logger.info("✅ [Webhook] Event processed successfully")
+        return {"received": True}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [Webhook] Error processing webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Webhook Error: {str(e)}"
+        )
 
 # --- User Endpoints ---
 @user_router.put("/webhook",

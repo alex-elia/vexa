@@ -337,6 +337,17 @@ async def set_user_webhook_proxy(request: Request):
     url = f"{ADMIN_API_URL}/user/webhook"
     return await forward_request(app.state.http_client, "PUT", url, request)
 
+# --- Stripe Webhook Route ---
+@app.post("/webhook/stripe",
+         tags=["Webhooks"],
+         summary="Handle Stripe webhook events",
+         description="Processes Stripe webhook events and forwards them to the Admin API for user data updates.",
+         status_code=status.HTTP_200_OK)
+async def stripe_webhook_proxy(request: Request):
+    """Forward Stripe webhook events to Admin API."""
+    url = f"{ADMIN_API_URL}/webhook/stripe"
+    return await forward_request(app.state.http_client, "POST", url, request)
+
 # --- Admin API Routes --- 
 @app.api_route("/admin/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], 
                tags=["Administration"],
