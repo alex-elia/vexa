@@ -15,6 +15,7 @@ let currentTask: string | null | undefined = 'transcribe'; // Default task
 let currentRedisUrl: string | null = null;
 let currentConnectionId: string | null = null;
 let botManagerCallbackUrl: string | null = null; // ADDED: To store callback URL
+let botManagerStartedCallbackUrl: string | null = null; // ADDED: To store started callback URL
 let currentPlatform: "google_meet" | "zoom" | "teams" | undefined;
 let page: Page | null = null; // Initialize page, will be set in runBot
 
@@ -213,6 +214,60 @@ async function performGracefulLeave(
 }
 // --- ----------------------------- ---
 
+// --- ADDED: Bot Started Callback Function ---
+async function sendBotStartedCallback(
+  status: string,
+  details?: string
+): Promise<void> {
+  if (botManagerStartedCallbackUrl && currentConnectionId) {
+    const payload = JSON.stringify({
+      connection_id: currentConnectionId,
+      status: status,
+      details: details
+    });
+
+    try {
+      log(`[Bot Started] Sending started callback to ${botManagerStartedCallbackUrl} with payload: ${payload}`);
+      log(`[Bot Started] Bot status: ${status}, Details: ${details || 'None'}, Connection ID: ${currentConnectionId}`);
+      
+      const url = new URL(botManagerStartedCallbackUrl);
+      const options: https.RequestOptions = {
+        method: 'POST',
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? '443' : '80'),
+        path: url.pathname,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload)
+        }
+      };
+
+      const req = (url.protocol === 'https:' ? https : http).request(options, (res: http.IncomingMessage) => {
+        log(`[Bot Started] Bot-manager started callback response status: ${res.statusCode}`);
+        if (res.statusCode === 200) {
+          log(`[Bot Started] Successfully sent '${status}' callback to bot-manager`);
+        } else {
+          log(`[Bot Started] Warning: Bot-manager returned status ${res.statusCode} for '${status}' callback`);
+        }
+        res.on('data', () => { /* consume data */ });
+      });
+
+      req.on('error', (err: Error) => {
+        log(`[Bot Started] Error sending bot-manager started callback: ${err.message}`);
+      });
+
+      req.write(payload);
+      req.end();
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } catch (callbackError: any) {
+      log(`[Bot Started] Exception during bot-manager started callback preparation: ${callbackError.message}`);
+    }
+  } else {
+    log(`[Bot Started] Cannot send callback: URL=${botManagerStartedCallbackUrl}, ConnectionID=${currentConnectionId}`);
+  }
+}
+// --- ------------------------------------ ---
+
 // --- ADDED: Function to be called from browser to trigger leave ---
 // This needs to be defined in a scope where 'page' will be available when it's exposed.
 // We will define the actual exposed function inside runBot where 'page' is in scope.
@@ -225,6 +280,7 @@ export async function runBot(botConfig: BotConfig): Promise<void> {
   currentRedisUrl = botConfig.redisUrl;
   currentConnectionId = botConfig.connectionId;
   botManagerCallbackUrl = botConfig.botManagerCallbackUrl || null; // ADDED: Get callback URL from botConfig
+  botManagerStartedCallbackUrl = botConfig.botManagerStartedCallbackUrl || null; // ADDED: Get started callback URL from botConfig
   currentPlatform = botConfig.platform; // Set currentPlatform here
 
   // Destructure other needed config values
@@ -301,6 +357,15 @@ export async function runBot(botConfig: BotConfig): Promise<void> {
     } else {
       log("[Node.js] Ignoring triggerNodeGracefulLeave as shutdown is already in progress.");
     }
+  });
+  // --- ----------------------------------------------------------------------- ---
+
+  // --- ADDED: Expose a function for browser to send bot started callback ---
+  await page.exposeFunction("sendBotStartedCallback", async (status: string, details?: string) => {
+    log(`[Node.js] Received sendBotStartedCallback from browser context: status=${status}, details=${details}`);
+    log(`[Node.js] Sending '${status}' callback to bot-manager for meeting activation`);
+    await sendBotStartedCallback(status, details);
+    log(`[Node.js] Completed sending '${status}' callback to bot-manager`);
   });
   // --- ----------------------------------------------------------------------- ---
 

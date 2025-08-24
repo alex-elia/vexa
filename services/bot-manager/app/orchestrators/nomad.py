@@ -136,28 +136,129 @@ def stop_bot_container(container_id: str) -> bool:  # type: ignore
     return False
 
 
-async def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:  # type: ignore
-    """Return a list of running bots for the given user.
-
-    Stub implementation – returns an empty list.
+async def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:
+    """Return a list of running bots for the given user by querying Nomad API.
+    
+    Queries Nomad for running jobs with the user_id label and returns
+    formatted bot status information.
     """
-    logger.info(
-        "get_running_bots_status called for user %s – not yet implemented for Nomad.",
-        user_id,
-    )
-    return []
+    logger.info(f"Getting running bot status for user {user_id} from Nomad")
+    
+    try:
+        # Query Nomad for running jobs with user_id label
+        url = f"{NOMAD_ADDR}/v1/jobs"
+        params = {
+            "prefix": BOT_JOB_NAME,
+            "filter": f"Meta.user_id == \"{user_id}\""
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            jobs_data = response.json()
+            
+        running_bots = []
+        
+        for job in jobs_data:
+            job_id = job.get("ID", "")
+            job_status = job.get("Status", "")
+            
+            # Only include running jobs
+            if job_status != "running":
+                continue
+                
+            # Get detailed job info including allocations
+            job_detail_url = f"{NOMAD_ADDR}/v1/job/{job_id}"
+            async with httpx.AsyncClient() as client:
+                job_response = await client.get(job_detail_url, timeout=10)
+                if job_response.status_code == 200:
+                    job_detail = job_response.json()
+                    
+                    # Get running allocations
+                    allocations = job_detail.get("Allocations", [])
+                    running_allocations = [
+                        alloc for alloc in allocations 
+                        if alloc.get("ClientStatus") == "running"
+                    ]
+                    
+                    if running_allocations:
+                        # Get metadata from job
+                        meta = job_detail.get("Meta", {})
+                        
+                        bot_info = {
+                            "container_id": job_id,  # Use job ID as container ID
+                            "connection_id": meta.get("connection_id", ""),
+                            "meeting_id": meta.get("meeting_id", ""),
+                            "platform": meta.get("platform", ""),
+                            "native_meeting_id": meta.get("native_meeting_id", ""),
+                            "bot_name": meta.get("bot_name", ""),
+                            "status": "running",
+                            "start_time": job_detail.get("SubmitTime", ""),
+                            "user_id": user_id
+                        }
+                        running_bots.append(bot_info)
+                        
+                        logger.info(f"Found running bot: {bot_info}")
+        
+        logger.info(f"Found {len(running_bots)} running bots for user {user_id}")
+        return running_bots
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error querying Nomad for user {user_id}: {e}")
+        return []
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error talking to Nomad for user {user_id}: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Unexpected error getting bot status for user {user_id}: {e}", exc_info=True)
+        return []
 
 
-async def verify_container_running(container_id: str) -> bool:  # type: ignore
+async def verify_container_running(container_id: str) -> bool:
     """Return True if the dispatched Nomad job is still running.
-
-    Stub implementation – always returns True.
+    
+    Queries Nomad API to check if the job exists and has running allocations.
     """
-    logger.debug(
-        "verify_container_running called for %s – assuming running (stub).",
-        container_id,
-    )
-    return True
+    logger.debug(f"Verifying if Nomad job {container_id} is running")
+    
+    try:
+        # Query Nomad for job details
+        url = f"{NOMAD_ADDR}/v1/job/{container_id}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10)
+            if response.status_code != 200:
+                logger.debug(f"Job {container_id} not found in Nomad (status: {response.status_code})")
+                return False
+                
+            job_detail = response.json()
+            job_status = job_detail.get("Status", "")
+            
+            if job_status != "running":
+                logger.debug(f"Job {container_id} status is '{job_status}', not running")
+                return False
+            
+            # Check if there are running allocations
+            allocations = job_detail.get("Allocations", [])
+            running_allocations = [
+                alloc for alloc in allocations 
+                if alloc.get("ClientStatus") == "running"
+            ]
+            
+            is_running = len(running_allocations) > 0
+            logger.debug(f"Job {container_id} has {len(running_allocations)} running allocations: {is_running}")
+            
+            return is_running
+            
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error verifying job {container_id}: {e}")
+        return False
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error talking to Nomad for job {container_id}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error verifying job {container_id}: {e}", exc_info=True)
+        return False
 
 # Alias for shared function – import lazily to avoid circulars
 from app.docker_utils import _record_session_start  # noqa: E402 

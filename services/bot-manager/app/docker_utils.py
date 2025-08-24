@@ -258,7 +258,8 @@ async def start_bot_container(
             "noOneJoinedTimeout": 120000,
             "everyoneLeftTimeout": 60000
         },
-        "botManagerCallbackUrl": f"http://bot-manager:8080/bots/internal/callback/exited"
+        "botManagerCallbackUrl": f"http://bot-manager:8080/bots/internal/callback/exited",
+        "botManagerStartedCallbackUrl": f"http://bot-manager:8080/bots/internal/callback/started"
     }
     # Remove keys with None values before serializing
     cleaned_config_data = {k: v for k, v in bot_config_data.items() if v is not None}

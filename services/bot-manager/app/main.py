@@ -71,6 +71,12 @@ class BotExitCallbackPayload(BaseModel):
     connection_id: str = Field(..., description="The connectionId (session_uid) of the exiting bot.")
     exit_code: int = Field(..., description="The exit code of the bot process (0 for success, 1 for UI leave failure).")
     reason: Optional[str] = Field("self_initiated_leave", description="Reason for the exit.")
+
+# --- ADDED: Pydantic Model for Bot Started Callback ---
+class BotStartedCallbackPayload(BaseModel):
+    connection_id: str = Field(..., description="The connectionId (session_uid) of the started bot.")
+    status: str = Field(..., description="Status of the bot (e.g., 'joined_meeting', 'recording_started').")
+    details: Optional[str] = Field(None, description="Additional details about the bot status.")
 # --- --------------------------------------------- ---
 
 @app.on_event("startup")
@@ -295,13 +301,15 @@ async def request_bot(
         asyncio.create_task(_record_session_start(meeting_id, connection_id))
         logger.info(f"Scheduled background task to record session start for meeting {meeting_id}, session {connection_id}")
 
-        logger.info(f"Attempting to update meeting {meeting_id} status to active with container ID {container_id}...")
+        logger.info(f"Attempting to update meeting {meeting_id} status to starting with container ID {container_id}...")
         current_meeting_for_bot_launch.bot_container_id = container_id
-        current_meeting_for_bot_launch.status = 'active'
+        current_meeting_for_bot_launch.status = 'starting'  # Changed from 'active' to 'starting'
         current_meeting_for_bot_launch.start_time = datetime.utcnow() # Use the imported datetime
         await db.commit()
         await db.refresh(current_meeting_for_bot_launch)
-        logger.info(f"Successfully updated meeting {meeting_id} status to active.")
+        logger.info(f"Successfully updated meeting {meeting_id} status to 'starting'. Waiting for bot started callback to set to 'active'.")
+        logger.info(f"Meeting {meeting_id} container {container_id} started at {current_meeting_for_bot_launch.start_time.isoformat()}")
+        logger.info(f"Next expected event: Bot started callback with status 'joined_meeting' or 'recording_started'")
 
         logger.info(f"Successfully started bot container {container_id} for meeting {meeting_id}")
         return MeetingResponse.from_orm(current_meeting_for_bot_launch)
@@ -660,6 +668,86 @@ async def bot_exit_callback(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred while processing the bot exit callback."
+        )
+# --- --------------------------------------------------------- ---
+
+# --- ADDED: Endpoint for Vexa-Bot to report its started status ---
+@app.post("/bots/internal/callback/started",
+          status_code=status.HTTP_200_OK,
+          summary="Callback for vexa-bot to report its started status",
+          include_in_schema=False) # Hidden from public API docs
+async def bot_started_callback(
+    payload: BotStartedCallbackPayload,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handles the started callback from a bot container.
+    - Finds the corresponding meeting session and meeting record.
+    - Updates the meeting status to 'active' when the bot successfully joins the meeting.
+    - This separates the "started" state from the "exited" state to handle container restarts properly.
+    """
+    logger.info(f"Received bot started callback: connection_id={payload.connection_id}, status={payload.status}, details={payload.details}")
+    
+    session_uid = payload.connection_id
+    bot_status = payload.status
+
+    try:
+        # Find the meeting session to get the meeting_id
+        session_stmt = select(MeetingSession).where(MeetingSession.session_uid == session_uid)
+        session_result = await db.execute(session_stmt)
+        meeting_session = session_result.scalars().first()
+
+        if not meeting_session:
+            logger.error(f"Bot started callback: Could not find meeting session for connection_id {session_uid}. Cannot update meeting status.")
+            return {"status": "error", "detail": "Meeting session not found"}
+
+        meeting_id = meeting_session.meeting_id
+        logger.info(f"Bot started callback: Found meeting_id {meeting_id} for connection_id {session_uid}")
+
+        # Now get the full meeting object
+        meeting = await db.get(Meeting, meeting_id)
+        if not meeting:
+            logger.error(f"Bot started callback: Found session but could not find meeting {meeting_id} itself.")
+            return {"status": "error", "detail": f"Meeting {meeting_id} not found"}
+
+        # Update meeting status based on bot status
+        if bot_status in ['joined_meeting', 'recording_started']:
+            previous_status = meeting.status
+            meeting.status = 'active'
+            logger.info(f"Bot started callback: Meeting {meeting_id} status updated from '{previous_status}' to 'active' (bot_status: {bot_status})")
+            
+            # Log additional context for debugging
+            if meeting.bot_container_id:
+                logger.info(f"Bot started callback: Meeting {meeting_id} is now active with container {meeting.bot_container_id}")
+            if meeting.start_time:
+                time_since_start = datetime.utcnow() - meeting.start_time
+                logger.info(f"Bot started callback: Meeting {meeting_id} became active {time_since_start.total_seconds():.1f} seconds after container start")
+            
+            # --- ADDED: Comprehensive flow summary log ---
+            logger.info(f"🎯 MEETING {meeting_id} FULLY ACTIVE - Complete flow summary:")
+            logger.info(f"   • Container {meeting.bot_container_id} started at {meeting.start_time.isoformat()}")
+            logger.info(f"   • Bot joined meeting at {datetime.utcnow().isoformat()}")
+            logger.info(f"   • Total time from container start to active: {time_since_start.total_seconds():.1f}s")
+            logger.info(f"   • Bot status: {bot_status}")
+            logger.info(f"   • Meeting is now ready for transcription and monitoring")
+            # --- --------------------------------------------------------- ---
+        else:
+            logger.warning(f"Bot started callback: Unknown bot status '{bot_status}' for meeting {meeting_id}.")
+            return {"status": "warning", "detail": f"Unknown bot status: {bot_status}"}
+        
+        await db.commit()
+        await db.refresh(meeting)
+        logger.info(f"Bot started callback: Meeting {meeting.id} successfully updated in DB.")
+
+        return {"status": "callback processed", "meeting_id": meeting.id, "final_status": meeting.status}
+
+    except Exception as e:
+        logger.error(f"Bot started callback: An unexpected error occurred: {e}", exc_info=True)
+        # Attempt to rollback any partial changes
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal error occurred while processing the bot started callback."
         )
 # --- --------------------------------------------------------- ---
 

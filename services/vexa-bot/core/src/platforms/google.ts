@@ -62,6 +62,23 @@ export async function handleGoogleMeet(
     }
 
     log("Successfully admitted to the meeting, starting recording");
+    
+    // --- ADDED: Send bot started callback when successfully admitted ---
+    try {
+      log("Sending bot started callback: joined_meeting");
+      await page.evaluate(async () => {
+        if (typeof (window as any).sendBotStartedCallback === 'function') {
+          await (window as any).sendBotStartedCallback('joined_meeting', 'Bot successfully joined Google Meet meeting');
+        } else {
+          console.error('[Google Meet] sendBotStartedCallback function not found on window');
+        }
+      });
+      log("Bot started callback sent: joined_meeting - Bot has successfully joined the meeting and is ready to start recording");
+    } catch (callbackError: any) {
+      log(`Error sending bot started callback: ${callbackError.message}`);
+    }
+    // --- --------------------------------------------------------- ---
+    
     // Pass platform from botConfig to startRecording
     await startRecording(page, botConfig);
   } catch (error: any) {
@@ -1055,6 +1072,20 @@ const startRecording = async (page: Page, botConfig: BotConfig) => {
             (window as any).logBot(
               "Audio processing pipeline connected and sending data silently."
             );
+
+            // --- ADDED: Send recording started callback ---
+            try {
+              (window as any).logBot("Sending recording started callback: recording_started");
+              if (typeof (window as any).sendBotStartedCallback === 'function') {
+                (window as any).sendBotStartedCallback('recording_started', 'Audio recording and transcription pipeline started successfully');
+                (window as any).logBot("Recording started callback sent: recording_started - Audio processing pipeline is now active and sending data to WhisperLive");
+              } else {
+                (window as any).logBot("sendBotStartedCallback function not found on window");
+              }
+            } catch (callbackError: any) {
+              (window as any).logBot(`Error sending recording started callback: ${callbackError.message}`);
+            }
+            // --- ------------------------------------------------- ---
 
             // Click the "People" button
             const peopleButton = document.querySelector(
