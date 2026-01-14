@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  vexa:
+    image: vexaai/vexa-lite:latest
+    container_name: vexa-production
+    restart: unless-stopped
+    ports:
+      - "8056:8056"
+    environment:
+      # Database Configuration (use Supabase or remote PostgreSQL)
+      - DATABASE_URL=${DATABASE_URL}
+      - DB_SSL_MODE=${DB_SSL_MODE:-require}
+      
+      # Admin Configuration
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN}
+      
+      # Transcription Service Configuration
+      - TRANSCRIBER_URL=${TRANSCRIBER_URL}
+      - TRANSCRIBER_API_KEY=${TRANSCRIBER_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8056/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
